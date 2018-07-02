@@ -1,10 +1,13 @@
 from neopixel import *
-from Queue import Queue
-from SimpleXMLRPCServer import SimpleXMLRPCServer
+from queue import Queue
 from threading import Thread
 from argparse import ArgumentParser
 import logging
 import time
+
+import signal
+from tornado.web import Application, RequestHandler
+from tornado.ioloop import IOLoop, PeriodicCallback
 
 
 class BacklightDriver:
@@ -98,53 +101,95 @@ class BacklightDriver:
             pos -= 170
             return Color(0, pos * 3, 255 - pos * 3)
 
-class BacklightRpcServer:
-    def __init__(self, config):
-        self._backlight = BacklightDriver(config['led_count'], config['led_pin'])
-        
-        self._rpc_server = SimpleXMLRPCServer((config['host'], config['port']), allow_none=True)
-        self._rpc_server.register_function(self._cmd_on, 'on')
-        self._rpc_server.register_function(self._cmd_off, 'off')
+class BacklightRequestHandler(RequestHandler):
+    backlight = None
 
-        self._running = False
+    @staticmethod
+    def initialize_backlight(led_count, led_pin):
+        logging.info('Initializing backlight driver')
+        BacklightRequestHandler.backlight = BacklightDriver(led_count, led_pin)
+        BacklightRequestHandler.backlight.start()
 
-    def serve(self):
-        self._running = True
+    @staticmethod
+    def cleanup():
+        if BacklightRequestHandler.backlight:
+            BacklightRequestHandler.backlight.stop()
 
-        self._backlight.start()
+    def post(self):
+        command = self.get_argument('command', None, strip=True)
 
-        try:
-            while self._running:
-                self._rpc_server.handle_request()
-        except KeyboardInterrupt:
-            logging.info('Recieve keyboard interruption')
+        if command:
+            logging.info('Processing command "{}"'.format(command))
 
-        self._backlight.stop()
+            if command == 'on':
+                self._cmd_on()
+            elif command == 'off':
+                self._cmd_off()
+            else:
+                logging.error('Invalid command "{}" provided'.format(command))
+        else:
+            logging.warn('No command provided')
 
     def _cmd_on(self):
-        self._backlight.post_cmd(BacklightDriver.CMD_ON)
+        if self.backlight:
+            self.backlight.post_cmd(BacklightDriver.CMD_ON)
+        else:
+            logging.error('Backlight driver has not been initialized')
 
     def _cmd_off(self):
-        self._backlight.post_cmd(BacklightDriver.CMD_OFF)
+        if self.backlight:
+            self.backlight.post_cmd(BacklightDriver.CMD_OFF)
+        else:
+            logging.error('Backlight driver has not been initialized')
 
-    def _cmd_exit(self):
-        self._running = False
+
+is_closing = False
+
+def signal_handler(sig, frame):
+    global is_closing
+    logging.info('Shutting down REST API...')
+    is_closing = True
+
+def try_exit():
+    global is_closing
+    if is_closing:
+        IOLoop.instance().stop()
+        logging.info("REST API shutdown")
 
 def main(args):
-    args = vars(args)
+    port = args.port
+    led_count = args.led_count
+    led_pin = args.led_pin
 
-    logging.info('Starting Backlight RPC Server')
-    server = BacklightRpcServer(args)
-    server.serve()
+    # Tell tornado to exit on SIGINT
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Initialize the static backlight driver
+    BacklightRequestHandler.initialize_backlight(led_count, led_pin)
+
+    # Create a tornado application
+    app = Application([
+        (r"/", BacklightRequestHandler)
+    ])
+
+    app.listen(port)
+
+    logging.info('Starting backlight service on port {}'.format(port))
+    PeriodicCallback(try_exit, 100).start()
+    IOLoop.instance().start()
+
+    # clean up the backlight driver
+    BacklightRequestHandler.cleanup()
+
+    logging.info('Exited')
+
 
 if __name__ == '__main__':
-
     logging.basicConfig(filename='backlight.log', level=logging.DEBUG)
 
     parser = ArgumentParser()
     parser.add_argument('-c', '--led-count', default=60, help='Number of LEDs on strip')
     parser.add_argument('-g', '--led-pin', default=18, help='LED strip GPIO pin')
-    parser.add_argument('-i', '--host', default='0.0.0.0', help='RPC server interface')
     parser.add_argument('-p', '--port', default=6142, help='RPC server port')
 
     args = parser.parse_args()
