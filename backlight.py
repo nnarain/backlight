@@ -108,7 +108,7 @@ class BacklightMqttClient(object):
         self._backlight = backlight
 
         # driver state
-        self._state = {'state': 'on'}
+        self._state = {'state': 'ON'}
 
         # setup MQTT client
         self._client = mqtt.Client()
@@ -121,10 +121,10 @@ class BacklightMqttClient(object):
 
     def _on_command(self, command):
         if 'state' in command:
-            state = command['state'].lower()
-            if state == 'on':
+            state = command['state']
+            if state == 'ON':
                 self._backlight.post_cmd(BacklightDriver.CMD_ON)
-            elif state == 'off':
+            elif state == 'OFF':
                 self._backlight.post_cmd(BacklightDriver.CMD_OFF)
 
             self._state['state'] = state
@@ -139,6 +139,9 @@ class BacklightMqttClient(object):
         # subscribe to registered topics
         for topic in self._topic_to_callback.keys():
             client.subscribe(topic)
+
+        # send startup state
+        self._send_state()
 
     def _on_message(self, client, userdata, msg):
         logging.info('Message recieved on topic "{}" with data: {}'.format(msg.topic, msg.payload))
