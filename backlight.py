@@ -61,6 +61,7 @@ class BacklightDriver:
         self._update_state(self.KEY_STATE, self.STATE_ON)
 
     def stop(self):
+        self.turn_off()
         self._animation_running = False
         if self._animation_thread:
             self._animation_thread.join()
@@ -78,26 +79,34 @@ class BacklightDriver:
                     elif cmd == self.CMD_OFF:
                         self.turn_off()
                     elif cmd == self.CMD_CLEAR:
-                        self._colorWipe(Color(0,0,0))
+                        self._colorWipe(Color(0,0,0), wait_ms=args)
 
             if self._is_on:
-                self._rainbowCycle()
+                if self._state[self.KEY_EFFECT] == 'rainbow':
+                    self._rainbowCycle()
+                elif self._state[self.KEY_EFFECT] == 'solid':
+                    self._colorWipe(Color(0, 255, 0))
 
     def turn_on(self):
         logging.info('Backlight on')
         self._is_on = True
         self._update_state(self.KEY_STATE, self.STATE_ON)
 
-    def turn_off(self):
+    def turn_off(self, ms=50):
         logging.info('Backlight off')
         self._is_on = False
         self._update_state(self.KEY_STATE, self.STATE_OFF)
 
-        self._cmd_queue.put((self.CMD_CLEAR, None))
+        self._cmd_queue.put((self.CMD_CLEAR, ms))
 
-    # def set_effect(self, effect, args=None):
-    #     current_effect = 
-    #     pass
+    def set_effect(self, effect, args=None):
+        if effect not in self.VALID_EFFECTS:
+            logging.warn('Invalid effect provided: {}'.format(effect))
+            return
+
+        self._update_state(self.KEY_EFFECT, effect)
+        self._is_on = False
+        self._cmd_queue.put((self.CMD_ON, None))
 
     def set_state_callback(self, callback):
         self._state_callback = callback
@@ -167,6 +176,10 @@ class BacklightMqttClient(object):
                 self._backlight.turn_on()
             elif state == 'OFF':
                 self._backlight.turn_off()
+        
+        if 'effect' in command:
+            effect = command['effect']
+            self._backlight.set_effect(effect)
 
     def _send_state(self, state):
         logging.info('Publishing state: {}'.format(state))
