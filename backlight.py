@@ -25,6 +25,7 @@ class BacklightDriver:
 
     KEY_STATE = 'state'
     KEY_EFFECT = 'effect'
+    KEY_COLOR = 'color'
     STATE_ON = 'ON'
     STATE_OFF = 'OFF'
 
@@ -51,7 +52,8 @@ class BacklightDriver:
         self._animation_running = False
 
         self._is_on = False
-    
+        self._solid_color = Color(255, 0, 0)
+
     def start(self):
         self._animation_thread = Thread(target=self._animate)
         self._animation_running = True
@@ -85,7 +87,7 @@ class BacklightDriver:
                 if self._state[self.KEY_EFFECT] == 'rainbow':
                     self._rainbowCycle()
                 elif self._state[self.KEY_EFFECT] == 'solid':
-                    self._colorWipe(Color(0, 255, 0))
+                    self._colorWipe(self._solid_color)
 
     def turn_on(self):
         logging.info('Backlight on')
@@ -107,6 +109,12 @@ class BacklightDriver:
         self._update_state(self.KEY_EFFECT, effect)
         self._is_on = False
         self._cmd_queue.put((self.CMD_ON, None))
+
+    def set_solid_color(self, color):
+        logging.info('Setting color to {}'.format(color))
+        self._solid_color = Color(color['g'], color['r'], color['b'])
+
+        self._update_state(self.KEY_COLOR, color)
 
     def set_state_callback(self, callback):
         self._state_callback = callback
@@ -180,6 +188,10 @@ class BacklightMqttClient(object):
         if 'effect' in command:
             effect = command['effect']
             self._backlight.set_effect(effect)
+
+        if 'color' in command:
+            color = command['color']
+            self._backlight.set_solid_color(color)
 
     def _send_state(self, state):
         logging.info('Publishing state: {}'.format(state))
