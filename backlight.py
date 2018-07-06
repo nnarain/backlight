@@ -19,10 +19,26 @@ class BacklightDriver:
     CMD_ON   = 0
     CMD_OFF  = 1
     CMD_EXIT = 2
+    CMD_RAINBOW = 3
+    CMD_SOLID =  4
+    CMD_CLEAR = 5
+
+    KEY_STATE = 'state'
+    KEY_EFFECT = 'effect'
+    STATE_ON = 'ON'
+    STATE_OFF = 'OFF'
+
+    VALID_EFFECTS = ['rainbow', 'solid']
 
     def __init__(self, led_count, led_pin):
         self._led_count = led_count
         self._led_pin = led_pin
+
+        self._state = {}
+        self._state_callback = None
+
+        self._update_state(self.KEY_STATE, self.STATE_OFF)
+        self._update_state(self.KEY_EFFECT, self.VALID_EFFECTS[0])
 
         # Create NeoPixel object with appropriate configuration.
         self._strip = Adafruit_NeoPixel(self._led_count, self._led_pin, self.LED_FREQ_HZ, self.LED_DMA, self.LED_INVERT, self.LED_BRIGHTNESS, self.LED_CHANNEL)
@@ -32,64 +48,88 @@ class BacklightDriver:
         self._cmd_queue = Queue()
 
         self._animation_thread = None
+        self._animation_running = False
+
+        self._is_on = False
     
     def start(self):
         self._animation_thread = Thread(target=self._animate)
+        self._animation_running = True
         self._animation_thread.start()
 
+        self._is_on = True
+        self._update_state(self.KEY_STATE, self.STATE_ON)
+
     def stop(self):
-        self.post_cmd(self.CMD_OFF)
-        self.post_cmd(self.CMD_EXIT)
+        self._animation_running = False
         if self._animation_thread:
             self._animation_thread.join()
 
+        self._update_state(self.KEY_STATE, self.STATE_OFF)
+
     def _animate(self):
-        running = True
-        while True:
+        while self._animation_running:
             if not self._cmd_queue.empty():
-                cmd = self._cmd_queue.get(timeout=0.5)
+                (cmd, args) = self._cmd_queue.get(timeout=0.5)
 
                 if cmd is not None:
                     if cmd == self.CMD_ON:
-                        logging.info('Enabling animation')
-                        running = True
-                        pass
+                        self.turn_on()
                     elif cmd == self.CMD_OFF:
-                        logging.info('Disabling animation')
-                        running = False
-                        self.colorWipe(self._strip, Color(0,0,0), 10)
-                        pass
-                    elif cmd == self.CMD_EXIT:
-                        logging.info('Exiting animation')
-                        running = False
-                        break
+                        self.turn_off()
+                    elif cmd == self.CMD_CLEAR:
+                        self._colorWipe(Color(0,0,0))
 
-            if running:
-                self.rainbowCycle(self._strip)
+            if self._is_on:
+                self._rainbowCycle()
 
-    def post_cmd(self, cmd):
-        self._cmd_queue.put(cmd)
+    def turn_on(self):
+        logging.info('Backlight on')
+        self._is_on = True
+        self._update_state(self.KEY_STATE, self.STATE_ON)
 
-    @staticmethod
-    def rainbowCycle(strip, wait_ms=20, iterations=5):
+    def turn_off(self):
+        logging.info('Backlight off')
+        self._is_on = False
+        self._update_state(self.KEY_STATE, self.STATE_OFF)
+
+        self._cmd_queue.put((self.CMD_CLEAR, None))
+
+    # def set_effect(self, effect, args=None):
+    #     current_effect = 
+    #     pass
+
+    def set_state_callback(self, callback):
+        self._state_callback = callback
+
+    def _update_state(self, k, v):
+        self._state[k] = v
+
+        if self._state_callback:
+            self._state_callback(self._state)
+
+    def _rainbowCycle(self, wait_ms=20, iterations=5):
         """Draw rainbow that uniformly distributes itself across all pixels."""
         for j in range(256*iterations):
-            for i in range(strip.numPixels()):
-                strip.setPixelColor(i, BacklightDriver.wheel((int(i * 256 / strip.numPixels()) + j) & 255))
-            strip.show()
+            for i in range(self._strip.numPixels()):
+                self._strip.setPixelColor(i, self._wheel((int(i * 256 / self._strip.numPixels()) + j) & 255))
+
+                if not self._is_on:
+                    return
+
+            self._strip.show()
             time.sleep(wait_ms/1000.0)
 
     # Define functions which animate LEDs in various ways.
-    @staticmethod
-    def colorWipe(strip, color, wait_ms=50):
+    def _colorWipe(self, color, wait_ms=50):
         """Wipe color across display a pixel at a time."""
-        for i in range(strip.numPixels()):
-            strip.setPixelColor(i, color)
-            strip.show()
+        for i in range(self._strip.numPixels()):
+            self._strip.setPixelColor(i, color)
+            self._strip.show()
             time.sleep(wait_ms/1000.0)
 
     @staticmethod
-    def wheel(pos):
+    def _wheel(pos):
         """Generate rainbow colors across 0-255 positions."""
         if pos < 85:
             return Color(pos * 3, 255 - pos * 3, 0)
@@ -106,9 +146,7 @@ class BacklightMqttClient(object):
 
     def __init__(self, backlight):
         self._backlight = backlight
-
-        # driver state
-        self._state = {'state': 'ON'}
+        self._backlight.set_state_callback(self._send_state)
 
         # setup MQTT client
         self._client = mqtt.Client()
@@ -119,29 +157,26 @@ class BacklightMqttClient(object):
 
         self.register(self.COMMAND_TOPIC, self._on_command)
 
+        # start the backlight
+        self._backlight.start()
+
     def _on_command(self, command):
         if 'state' in command:
             state = command['state']
             if state == 'ON':
-                self._backlight.post_cmd(BacklightDriver.CMD_ON)
+                self._backlight.turn_on()
             elif state == 'OFF':
-                self._backlight.post_cmd(BacklightDriver.CMD_OFF)
+                self._backlight.turn_off()
 
-            self._state['state'] = state
-
-        self._send_state()
-
-    def _send_state(self):
-        self._client.publish(self.STATE_TOPIC, json.dumps(self._state))
+    def _send_state(self, state):
+        logging.info('Publishing state: {}'.format(state))
+        self._client.publish(self.STATE_TOPIC, json.dumps(state))
 
     def _on_connect(self, client, userdata, flags, rc):
         logging.info('MQTT client connected')
         # subscribe to registered topics
         for topic in self._topic_to_callback.keys():
             client.subscribe(topic)
-
-        # send startup state
-        self._send_state()
 
     def _on_message(self, client, userdata, msg):
         logging.info('Message recieved on topic "{}" with data: {}'.format(msg.topic, msg.payload))
@@ -178,7 +213,6 @@ def main(args):
 
     # create the driver
     backlight = BacklightDriver(led_count, led_pin)
-    backlight.start()
 
     # create the mqtt client
     client = BacklightMqttClient(backlight)
