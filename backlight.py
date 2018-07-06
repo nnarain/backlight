@@ -1,13 +1,12 @@
+import time
+import json
+import logging
 from neopixel import *
 from queue import Queue
 from threading import Thread
-from argparse import ArgumentParser
-import logging
-import time
+import paho.mqtt.client as mqtt
 
-import signal
-from tornado.web import Application, RequestHandler
-from tornado.ioloop import IOLoop, PeriodicCallback
+from argparse import ArgumentParser
 
 
 class BacklightDriver:
@@ -101,91 +100,103 @@ class BacklightDriver:
             pos -= 170
             return Color(0, pos * 3, 255 - pos * 3)
 
-class BacklightRequestHandler(RequestHandler):
-    backlight = None
+class BacklightMqttClient(object):
+    COMMAND_TOPIC = '/home/backlight/set'
+    STATE_TOPIC = '/home/backlight/state'
 
-    @staticmethod
-    def initialize_backlight(led_count, led_pin):
-        logging.info('Initializing backlight driver')
-        BacklightRequestHandler.backlight = BacklightDriver(led_count, led_pin)
-        BacklightRequestHandler.backlight.start()
+    def __init__(self, backlight):
+        self._backlight = backlight
 
-    @staticmethod
-    def cleanup():
-        if BacklightRequestHandler.backlight:
-            BacklightRequestHandler.backlight.stop()
+        # driver state
+        self._state = {'state': 'ON'}
 
-    def post(self):
-        command = self.get_argument('command', None, strip=True)
+        # setup MQTT client
+        self._client = mqtt.Client()
+        self._client.on_connect = self._on_connect
+        self._client.on_message = self._on_message
 
-        if command:
-            logging.info('Processing command "{}"'.format(command))
+        self._topic_to_callback = {}
 
-            if command == 'on':
-                self._cmd_on()
-            elif command == 'off':
-                self._cmd_off()
-            else:
-                logging.error('Invalid command "{}" provided'.format(command))
-        else:
-            logging.warn('No command provided')
+        self.register(self.COMMAND_TOPIC, self._on_command)
 
-    def _cmd_on(self):
-        if self.backlight:
-            self.backlight.post_cmd(BacklightDriver.CMD_ON)
-        else:
-            logging.error('Backlight driver has not been initialized')
+    def _on_command(self, command):
+        if 'state' in command:
+            state = command['state']
+            if state == 'ON':
+                self._backlight.post_cmd(BacklightDriver.CMD_ON)
+            elif state == 'OFF':
+                self._backlight.post_cmd(BacklightDriver.CMD_OFF)
 
-    def _cmd_off(self):
-        if self.backlight:
-            self.backlight.post_cmd(BacklightDriver.CMD_OFF)
-        else:
-            logging.error('Backlight driver has not been initialized')
+            self._state['state'] = state
 
+        self._send_state()
 
-is_closing = False
+    def _send_state(self):
+        self._client.publish(self.STATE_TOPIC, json.dumps(self._state))
 
-def signal_handler(sig, frame):
-    global is_closing
-    logging.info('Shutting down REST API...')
-    is_closing = True
+    def _on_connect(self, client, userdata, flags, rc):
+        logging.info('MQTT client connected')
+        # subscribe to registered topics
+        for topic in self._topic_to_callback.keys():
+            client.subscribe(topic)
 
-def try_exit():
-    global is_closing
-    if is_closing:
-        IOLoop.instance().stop()
-        logging.info("REST API shutdown")
+        # send startup state
+        self._send_state()
+
+    def _on_message(self, client, userdata, msg):
+        logging.info('Message recieved on topic "{}" with data: {}'.format(msg.topic, msg.payload))
+        # get callback for this topic and call it, if it exists
+        callback = self._topic_to_callback.get(msg.topic, None)
+
+        if callback:
+            payload = msg.payload.decode('utf-8')
+            try:
+                json_data = json.loads(payload)
+                callback(json_data)
+            except ValueError as e:
+                logging.error('Caught ValueError: {}'.format(e))
+            except TypeError as e:
+                logging.error('Caught TypeError: {}'.format(e))
+            except Exception as e:
+                logging.error('Caught unknown exception: {}'.format(e))
+
+    def connect(self, broker):
+        logging.info('Connecting to MQTT broker "{}"'.format(broker))
+        self._client.connect(broker)
+
+    def spin(self):
+        self._client.loop_forever()
+
+    def register(self, topic, callback):
+        self._topic_to_callback[topic] = callback
+
 
 def main(args):
     port = args.port
     led_count = args.led_count
     led_pin = args.led_pin
 
-    # Tell tornado to exit on SIGINT
-    signal.signal(signal.SIGINT, signal_handler)
+    # create the driver
+    backlight = BacklightDriver(led_count, led_pin)
+    backlight.start()
 
-    # Initialize the static backlight driver
-    BacklightRequestHandler.initialize_backlight(led_count, led_pin)
+    # create the mqtt client
+    client = BacklightMqttClient(backlight)
+    client.connect('localhost')
 
-    # Create a tornado application
-    app = Application([
-        (r"/", BacklightRequestHandler)
-    ])
+    # loop
+    try:
+        client.spin()
+    except KeyboardInterrupt:
+        pass
 
-    app.listen(port)
-
-    logging.info('Starting backlight service on port {}'.format(port))
-    PeriodicCallback(try_exit, 100).start()
-    IOLoop.instance().start()
-
-    # clean up the backlight driver
-    BacklightRequestHandler.cleanup()
+    backlight.stop()
 
     logging.info('Exited')
 
 
 if __name__ == '__main__':
-    logging.basicConfig(filename='backlight.log', level=logging.DEBUG)
+    logging.basicConfig(format="[%(levelname)-8s] %(filename)s:%(lineno)d: %(message)s", filename='backlight.log', level=logging.DEBUG)
 
     parser = ArgumentParser()
     parser.add_argument('-c', '--led-count', default=60, help='Number of LEDs on strip')
@@ -197,5 +208,6 @@ if __name__ == '__main__':
     try:
         main(args)
     except Exception as e:
+        import traceback
         logging.error('{}'.format(e))
- 
+        traceback.print_exc()
