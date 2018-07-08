@@ -125,6 +125,9 @@ class BacklightDriver:
         if self._state_callback:
             self._state_callback(self._state)
 
+    def get_state(self):
+        return self._state
+
     def _rainbowCycle(self, wait_ms=20, iterations=5):
         """Draw rainbow that uniformly distributes itself across all pixels."""
         for j in range(256*iterations):
@@ -163,7 +166,7 @@ class BacklightMqttClient(object):
 
     def __init__(self, backlight):
         self._backlight = backlight
-        self._backlight.set_state_callback(self._send_state)
+        self._backlight.set_state_callback(self._publish_state)
 
         # setup MQTT client
         self._client = mqtt.Client()
@@ -193,7 +196,7 @@ class BacklightMqttClient(object):
             color = command['color']
             self._backlight.set_solid_color(color)
 
-    def _send_state(self, state):
+    def _publish_state(self, state):
         logging.info('Publishing state: {}'.format(state))
         self._client.publish(self.STATE_TOPIC, json.dumps(state))
 
@@ -202,6 +205,9 @@ class BacklightMqttClient(object):
         # subscribe to registered topics
         for topic in self._topic_to_callback.keys():
             client.subscribe(topic)
+
+        # publish state on connection to the broker
+        self._publish_state(self._backlight.get_state())
 
     def _on_message(self, client, userdata, msg):
         logging.info('Message recieved on topic "{}" with data: {}'.format(msg.topic, msg.payload))
